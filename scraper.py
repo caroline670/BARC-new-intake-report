@@ -34,7 +34,7 @@ SHELTER_URL = "https://24petconnect.com/BARCadopt"
 SHELTER_NAME = "BARC Animal Shelter & Adoptions"
 SEEN_IDS_FILE = Path(__file__).parent / "seen_ids.json"
 HOUSTON_TZ = ZoneInfo("America/Chicago")
-MAX_PAGES = 8  # safety cap so a scraping hiccup can't loop forever
+MAX_PAGES = 20  # safety cap so a scraping hiccup can't loop forever
 
 HEADERS = {
     "User-Agent": (
@@ -110,17 +110,84 @@ def parse_animals(html: str) -> list[dict]:
         )
     return animals
 
+# Recognizes the "Animals: 1 - 30 of 229" counter the site shows, so we can
+# log how many total results we're supposed to be paging through.
+TOTAL_COUNT_RE = re.compile(r"Animals:\s*\d+\s*-\s*\d+\s*of\s*(\d+)")
+
+
+def click_first_match(page, attempts: list, label: str) -> bool:
+    """Try a list of (role-or-text) locator strategies in order; click the
+    first one that actually finds something. Logs what it tried, so a future
+    failure shows exactly which selector came up empty instead of just
+    silently giving up."""
+    for describe, make_locator in attempts:
+        loc = make_locator()
+        count = loc.count()
+        print(f"    [{label}] trying {describe} — {count} candidate(s)")
+        if count > 0:
+            try:
+                loc.first.click()
+                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_timeout(1500)
+                return True
+            except Exception as e:
+                print(f"    [{label}] click via {describe} failed: {e}")
+    return False
+
+
+def click_dogs_filter(page) -> bool:
+    """Try to switch the listing to the Dogs-only tab, so we're not wasting
+    pages on cats/other animals. Not fatal if this doesn't work — we still
+    filter by animal_type after parsing either way."""
+    return click_first_match(
+        page,
+        [
+            ("role=tab 'Dogs'", lambda: page.get_by_role("tab", name="Dogs", exact=True)),
+            ("role=button 'Dogs'", lambda: page.get_by_role("button", name="Dogs", exact=True)),
+            ("role=link 'Dogs'", lambda: page.get_by_role("link", name="Dogs", exact=True)),
+            ("text 'Dogs'", lambda: page.get_by_text("Dogs", exact=True)),
+        ],
+        label="Dogs filter",
+    )
+
+
+def click_next_page(page, current_page_num: int) -> bool:
+    """Try several ways of advancing to the next page: an exact page-number
+    link/button, or a generic 'Next' control."""
+    target = str(current_page_num + 1)
+    return click_first_match(
+        page,
+        [
+            (f"role=link '{target}'", lambda: page.get_by_role("link", name=target, exact=True)),
+            (f"role=button '{target}'", lambda: page.get_by_role("button", name=target, exact=True)),
+            (f"text '{target}'", lambda: page.get_by_text(target, exact=True)),
+            ("role=link 'Next'", lambda: page.get_by_role("link", name=re.compile("next", re.I))),
+            ("role=button 'Next'", lambda: page.get_by_role("button", name=re.compile("next", re.I))),
+        ],
+        label="next page",
+    )
+
 
 def scrape_all_dogs() -> list[dict]:
-    """Load the listing in a headless browser, then click through numbered
-    pages until we run out of pages, hit MAX_PAGES, or a page turns up
-    empty."""
+    """Load the listing in a headless browser, switch to the Dogs tab if
+    possible, then click through pages until we run out, hit MAX_PAGES, or a
+    page turns up empty."""
     all_animals: dict[str, dict] = {}
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent=HEADERS["User-Agent"])
         html = fetch_rendered_html(page, SHELTER_URL)
+
+        if click_dogs_filter(page):
+            html = page.content()
+        else:
+            print("  Couldn't find a Dogs filter tab — will filter dogs out "
+                  "of the full mixed listing instead.")
+
+        total_match = TOTAL_COUNT_RE.search(BeautifulSoup(html, "html.parser").get_text(" "))
+        if total_match:
+            print(f"Listing reports {total_match.group(1)} total result(s) to page through.")
 
         page_num = 1
         while page_num <= MAX_PAGES:
@@ -130,8 +197,6 @@ def scrape_all_dogs() -> list[dict]:
 
             if not animals:
                 if page_num == 1:
-                    # First page came back empty — dump a snippet so we can
-                    # see what actually loaded, next time this needs fixing.
                     text_snippet = BeautifulSoup(html, "html.parser").get_text(" ")
                     text_snippet = re.sub(r"\s+", " ", text_snippet)[:800]
                     print("DEBUG — first 800 chars of rendered page text:")
@@ -141,24 +206,17 @@ def scrape_all_dogs() -> list[dict]:
             for a in animals:
                 all_animals[a["id"]] = a
 
-            # Try to click through to the next numbered page.
-            next_link = page.get_by_role("link", name=str(page_num + 1), exact=True)
-            if next_link.count() == 0:
+            if not click_next_page(page, page_num):
+                print(f"  No further page found after page {page_num} — stopping.")
                 break
-            try:
-                next_link.first.click()
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(1500)
-                html = page.content()
-            except Exception as e:
-                print(f"Couldn't advance past page {page_num}: {e}")
-                break
+            html = page.content()
             page_num += 1
 
         browser.close()
 
     dogs = [a for a in all_animals.values() if a["animal_type"].lower() == "dog"]
     return dogs
+
 
 
 def load_seen_ids() -> set[str]:
