@@ -47,14 +47,14 @@ HEADERS = {
 # renders it. We work off the visible label:value text rather than CSS
 # classes, since that's the more stable part of the page across redesigns.
 ANIMAL_BLOCK_RE = re.compile(
-    r"Name:\s*(?P<name>.+?)\s*\((?P<id>A\d+)\)\s*"
-    r"Gender:\s*(?P<gender>.+?)\s*"
-    r"Breed:\s*(?P<breed>.+?)\s*"
-    r"Animal type:\s*(?P<animal_type>.+?)\s*"
-    r"Age:\s*(?P<age>.+?)\s*"
-    r"Brought to the shelter:\s*(?P<intake_date>[\d.]+)\s*"
-    r"Located at:\s*(?P<location>.+?)\s*"
-    r"ViewType:\s*\w+",
+    r"Name\s*:\s*(?P<name>.+?)\s*\((?P<id>A\d+)\)\s*"
+    r"Gender\s*:\s*(?P<gender>.+?)\s*"
+    r"Breed\s*:\s*(?P<breed>.+?)\s*"
+    r"Animal type\s*:\s*(?P<animal_type>.+?)\s*"
+    r"Age\s*:\s*(?P<age>.+?)\s*"
+    r"Brought to the shelter\s*:\s*(?P<intake_date>[\d.]+)\s*"
+    r"Located at\s*:\s*(?P<location>.+?)\s*"
+    r"ViewType\s*:\s*\w+",
     re.DOTALL,
 )
 
