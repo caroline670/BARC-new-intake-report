@@ -25,8 +25,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 # ---- Config -----------------------------------------------------------
 
@@ -64,28 +64,12 @@ ANIMAL_BLOCK_RE = re.compile(
 IMAGE_ALT_RE = re.compile(r"Image_(?P<id>A\d+)")
 
 
-def fetch_page(url: str) -> str:
-    resp = requests.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    return resp.text
-
-
-def find_next_page_url(html: str, current_url: str) -> str | None:
-    """Look for a pagination link to the next numbered page."""
-    soup = BeautifulSoup(html, "html.parser")
-    # Grab every link whose visible text is just a number (page 1, 2, 3...).
-    numbered_links = []
-    for a in soup.find_all("a", href=True):
-        text = a.get_text(strip=True)
-        if text.isdigit():
-            numbered_links.append((int(text), a["href"]))
-    if not numbered_links:
-        return None
-    numbered_links.sort(key=lambda pair: pair[0])
-    # We want the smallest page number greater than "1" that we haven't
-    # already fetched. Since we always call this from a page we just
-    # fetched, the caller tracks which page number it currently holds.
-    return numbered_links
+def fetch_rendered_html(page, url: str) -> str:
+    """Load the page in a real (headless) browser and let its JavaScript
+    populate the animal listing before reading the HTML back out."""
+    page.goto(url, wait_until="networkidle", timeout=45000)
+    page.wait_for_timeout(2000)  # small buffer for any lazy AJAX calls
+    return page.content()
 
 
 def parse_images(html: str) -> dict[str, str]:
@@ -128,34 +112,50 @@ def parse_animals(html: str) -> list[dict]:
 
 
 def scrape_all_dogs() -> list[dict]:
-    """Fetch page 1, then follow numbered pagination links until we run
-    out of pages, hit MAX_PAGES, or a page returns no animals."""
+    """Load the listing in a headless browser, then click through numbered
+    pages until we run out of pages, hit MAX_PAGES, or a page turns up
+    empty."""
     all_animals: dict[str, dict] = {}
-    visited_urls = set()
-    url = SHELTER_URL
-    page_num = 1
 
-    while url and url not in visited_urls and page_num <= MAX_PAGES:
-        visited_urls.add(url)
-        html = fetch_page(url)
-        animals = parse_animals(html)
-        if not animals:
-            break
-        for a in animals:
-            all_animals[a["id"]] = a
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        html = fetch_rendered_html(page, SHELTER_URL)
 
-        # Try to find a link to the next page number.
-        numbered_links = find_next_page_url(html, url)
-        next_url = None
-        if numbered_links:
-            for num, href in numbered_links:
-                if num == page_num + 1:
-                    next_url = href
-                    if href.startswith("/"):
-                        next_url = "https://24petconnect.com" + href
-                    break
-        url = next_url
-        page_num += 1
+        page_num = 1
+        while page_num <= MAX_PAGES:
+            animals = parse_animals(html)
+            dog_count = sum(1 for a in animals if a["animal_type"].lower() == "dog")
+            print(f"Page {page_num}: {len(animals)} animal(s) found, {dog_count} dog(s).")
+
+            if not animals:
+                if page_num == 1:
+                    # First page came back empty — dump a snippet so we can
+                    # see what actually loaded, next time this needs fixing.
+                    text_snippet = BeautifulSoup(html, "html.parser").get_text(" ")
+                    text_snippet = re.sub(r"\s+", " ", text_snippet)[:800]
+                    print("DEBUG — first 800 chars of rendered page text:")
+                    print(text_snippet)
+                break
+
+            for a in animals:
+                all_animals[a["id"]] = a
+
+            # Try to click through to the next numbered page.
+            next_link = page.get_by_role("link", name=str(page_num + 1), exact=True)
+            if next_link.count() == 0:
+                break
+            try:
+                next_link.first.click()
+                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_timeout(1500)
+                html = page.content()
+            except Exception as e:
+                print(f"Couldn't advance past page {page_num}: {e}")
+                break
+            page_num += 1
+
+        browser.close()
 
     dogs = [a for a in all_animals.values() if a["animal_type"].lower() == "dog"]
     return dogs
