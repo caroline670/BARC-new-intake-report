@@ -1,0 +1,42 @@
+name: BARC Dog Watch
+
+on:
+  schedule:
+    # 13:00 UTC ≈ 8:00 AM Central (Daylight Time) / 7:00 AM Central (Standard Time).
+    # GitHub Actions cron doesn't auto-adjust for DST — this drifts by an hour
+    # twice a year, which is fine for a daily digest.
+    - cron: "0 13 * * *"
+  workflow_dispatch: {}  # lets you click "Run workflow" in the Actions tab to test
+
+permissions:
+  contents: write  # needed so the workflow can save the updated seen_ids.json
+
+jobs:
+  check-for-new-dogs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper and send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python scraper.py
+
+      - name: Save updated seen-dogs list
+        run: |
+          git config user.name "barc-dog-watch-bot"
+          git config user.email "actions@github.com"
+          git add seen_ids.json
+          git diff --quiet --cached || git commit -m "Update seen dog IDs"
+          git push
