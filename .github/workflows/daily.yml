@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write  # needed so the workflow can save the updated seen_ids.json
 
+concurrency:
+  group: barc-dog-watch
+  cancel-in-progress: false  # let overlapping runs queue instead of racing each other
+  
 jobs:
   check-for-new-dogs:
     runs-on: ubuntu-latest
