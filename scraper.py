@@ -46,8 +46,17 @@ HEADERS = {
 # Matches one animal "card" worth of plain text, in the order 24petconnect
 # renders it. We work off the visible label:value text rather than CSS
 # classes, since that's the more stable part of the page across redesigns.
+# Matches one animal "card" worth of plain text, in the order 24petconnect
+# renders it. We work off the visible label:value text rather than CSS
+# classes, since that's the more stable part of the page across redesigns.
+#
+# The "Name" field is captured as one loose blob (namepart) rather than
+# assuming a fixed "NAME (ID)" shape, because unnamed littermates (common
+# for young puppies) show up as just the ID with no name and no parentheses
+# at all, e.g. "Name : A2098298" instead of "Name : DEXTER (A2060330)".
+# parse_animals() below splits namepart into name + id afterward.
 ANIMAL_BLOCK_RE = re.compile(
-    r"Name\s*:\s*(?P<name>.+?)\s*\((?P<id>A\d+)\)\s*"
+    r"Name\s*:\s*(?P<namepart>.+?)\s*"
     r"Gender\s*:\s*(?P<gender>.+?)\s*"
     r"Breed\s*:\s*(?P<breed>.+?)\s*"
     r"Animal type\s*:\s*(?P<animal_type>.+?)\s*"
@@ -57,6 +66,12 @@ ANIMAL_BLOCK_RE = re.compile(
     r"ViewType\s*:\s*\w+",
     re.DOTALL,
 )
+
+# A namepart that's "SOMETHING (A1234567)" — a named animal.
+NAMED_RE = re.compile(r"^(?P<name>.*?)\s*\((?P<id>A\d+)\)$")
+
+# A namepart that's just "A1234567" on its own — an unnamed animal.
+BARE_ID_RE = re.compile(r"^(?P<id>A\d+)$")
 
 # Each photo's alt text is literally "Image_<animalID>" (e.g. "Image_A2094187"),
 # which is a much more reliable hook than any CSS class for tying a photo to
@@ -87,6 +102,26 @@ def parse_images(html: str) -> dict[str, str]:
     return images
 
 
+def split_name_and_id(namepart: str) -> tuple[str, str | None]:
+    """Turn the raw 'Name' field text into (display_name, animal_id).
+    Handles both 'DEXTER (A2060330)' and the bare 'A2098298' (unnamed
+    littermate) formats."""
+    namepart = namepart.strip()
+
+    m = NAMED_RE.match(namepart)
+    if m:
+        name = m.group("name").strip() or "Unnamed"
+        return name, m.group("id")
+
+    m = BARE_ID_RE.match(namepart)
+    if m:
+        return "Unnamed", m.group("id")
+
+    # Unexpected format — keep the text as the name, but with no ID we can't
+    # track or de-duplicate this entry, so the caller will skip it.
+    return namepart, None
+
+
 def parse_animals(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(separator=" ")
@@ -94,11 +129,14 @@ def parse_animals(html: str) -> list[dict]:
     images = parse_images(html)
     animals = []
     for m in ANIMAL_BLOCK_RE.finditer(text):
-        animal_id = m.group("id")
+        name, animal_id = split_name_and_id(m.group("namepart"))
+        if not animal_id:
+            print(f"  Skipping an entry with an unrecognized Name field: {m.group('namepart')!r}")
+            continue
         animals.append(
             {
                 "id": animal_id,
-                "name": m.group("name").strip(),
+                "name": name,
                 "gender": m.group("gender").strip(),
                 "breed": m.group("breed").strip(),
                 "animal_type": m.group("animal_type").strip(),
